@@ -1,0 +1,16 @@
+{
+  "name": "rival-review",
+  "description": "Cross-model review plugins",
+  "owner": {
+    "name": "George-Ye",
+    "url": "https://github.com/George-Ye"
+  },
+  "plugins": [
+    {
+      "name": "rival-review",
+      "version": "0.1.0",
+      "description": "Cross-model review — Claude Code writes, Codex CLI reviews, automated consensus loop",
+      "source": "https://github.com/George-Ye/rival-review"
+    }
+  ]
+}

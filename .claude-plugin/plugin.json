@@ -1,7 +1,8 @@
 {
   "name": "rival-review",
-  "description": "Cross-model plan review — Claude Code writes plans, Codex CLI reviews them, automated loop until consensus",
+  "version": "0.1.0",
+  "description": "Cross-model review — Claude Code writes, Codex CLI reviews, automated consensus loop",
   "author": {
-    "name": "xiezhaoji"
+    "name": "George-Ye"
   }
 }
