@@ -137,25 +137,25 @@ def now_iso() -> str:
 
 
 def load_json(path: Path) -> dict:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
 def save_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
 
 def save_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(text)
 
 
 def read_text(path: Path) -> str:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return f.read()
 
 
@@ -322,7 +322,7 @@ def parse_codex_output(jsonl_path: Path) -> tuple[str | None, dict | None]:
     a valid JSON object with 'approved' field.
     """
     events = []
-    with open(jsonl_path) as f:
+    with open(jsonl_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -490,7 +490,7 @@ def _stream_codex(
     except FileNotFoundError:
         print("  Error: codex command not found")
         save_text(output_path, "")
-        return -1
+        return -2  # distinct from -1 (timeout)
 
     # Send prompt and close stdin
     if proc.stdin:
@@ -719,7 +719,7 @@ def cmd_review(
         return EXIT_BLOCKED
 
     transport_cfg = contract.get("transport", {})
-    timeout_sec = timeout_override or transport_cfg.get("timeout_sec", 1800)
+    timeout_sec = timeout_override if timeout_override is not None else transport_cfg.get("timeout_sec", 1800)
     sandbox = transport_cfg.get("sandbox", "read-only")
     allow_resume = transport_cfg.get("allow_resume", True)
 
@@ -785,6 +785,8 @@ def cmd_review(
         if exit_code == 0:
             actual_transport = "resume"
             tid, review = parse_codex_output(resume_raw)
+            if tid:
+                thread_id = tid
             if review:
                 val_errors = validate_review(review, contract)
                 if val_errors:
@@ -851,10 +853,18 @@ def cmd_review(
     }
     save_json(rdir / "transport.json", transport_meta)
 
+    # --- Error: codex not found ---
+    if exit_code == -2:
+        print("Error: codex command not found. Install Codex CLI first.")
+        state["status"] = "error"
+        state["last_verdict"] = "error"
+        state["updated_at"] = now_iso()
+        save_json(work_path(STATE_FILE), state)
+        return EXIT_ERROR
+
     # --- Error: timeout ---
     if exit_code == -1:
         print(f"Error: Codex call timed out after {timeout_sec}s")
-        # Do NOT increment current_round on transport failure
         state["status"] = "error"
         state["last_verdict"] = "error"
         state["updated_at"] = now_iso()

@@ -65,7 +65,7 @@ python3 rival_review.py review
 
 # 4. Check status
 python3 rival_review.py status
-# → Round 1 | needs_revision | confidence: 0.95 | issues: 3 (2 major)
+# → Round 1 | needs_revision | verdict: needs_revision | transport: fresh | thread: 019d37c2...
 
 # 5. Claude revises draft, then reviews again
 python3 rival_review.py review
@@ -120,12 +120,14 @@ You:    yes
 
 | Command | Description |
 |---------|-------------|
-| `rival-review init` | Scaffold `.rival-review/` with empty templates |
-| `rival-review review` | Run one review round (fresh exec, default) |
-| `rival-review review --resume` | Attempt to resume previous Codex session |
-| `rival-review review --timeout 600` | Override timeout (seconds) |
-| `rival-review review --model o3` | Override Codex model |
-| `rival-review status` | Show current round, verdict, transport info |
+| `python3 rival_review.py init` | Scaffold `.rival-review/` with empty templates |
+| `python3 rival_review.py review` | Run one review round (fresh exec, default) |
+| `python3 rival_review.py review --resume` | Attempt to resume previous Codex session |
+| `python3 rival_review.py review --timeout 600` | Override timeout (seconds) |
+| `python3 rival_review.py review --model o3` | Override Codex model |
+| `python3 rival_review.py review --reasoning-effort high` | Override reasoning effort |
+| `python3 rival_review.py review --verbose` | Show file reads and commands |
+| `python3 rival_review.py status` | Show current round, verdict, transport info |
 
 ## Exit Codes
 
@@ -139,15 +141,17 @@ You:    yes
 
 ## Defaults
 
-| Setting | Default | Source |
-|---------|---------|-------|
-| Model | gpt-5.4 | contract.json |
-| Reasoning effort | xhigh | contract.json |
-| Timeout | 1800s (30 min) | contract.json |
-| Max rounds | 0 (unlimited) | contract.json |
-| Transport | fresh exec | - |
+| Setting | Default | Source | CLI Override |
+|---------|---------|-------|-------------|
+| Model | gpt-5.4 | contract.json | `--model o3` |
+| Reasoning effort | xhigh | contract.json | `--reasoning-effort high` |
+| Timeout | 1800s (30 min) | contract.json | `--timeout 600` |
+| Max rounds | 0 (unlimited) | contract.json | set in contract.json |
+| After approval | present_plan_only | contract.json | set in contract.json |
+| Transport | fresh exec | - | `--resume` |
+| Verbose | off | - | `--verbose` / `-v` |
 
-CLI flags (`--model`, `--timeout`) override contract.json values.
+CLI flags override contract.json values.
 
 ## Key Design Decisions
 
