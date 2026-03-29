@@ -91,7 +91,7 @@ DEFAULT_CONTRACT = {
     "source_manifest": [],
     "transport": {
         "allow_resume": True,
-        "timeout_sec": 300,
+        "timeout_sec": 1800,
         "sandbox": "read-only",
     },
     "max_rounds": 5,

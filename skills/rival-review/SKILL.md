@@ -73,7 +73,7 @@ Write machine-readable contract to `.rival-review/contract.json`:
   ],
   "transport": {
     "allow_resume": true,
-    "timeout_sec": 300,
+    "timeout_sec": 1800,
     "sandbox": "read-only"
   },
   "max_rounds": 5,
@@ -111,7 +111,9 @@ Write machine-readable contract to `.rival-review/contract.json`:
 
 ### Phase 2 — Review
 
-Run the runner:
+Run the runner. **Use `run_in_background: true`** because Codex review
+can take 10+ minutes with high-reasoning models, exceeding the Bash tool's
+timeout limit:
 
 ```bash
 python3 rival_review.py review
