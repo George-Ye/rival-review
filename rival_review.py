@@ -94,7 +94,7 @@ DEFAULT_CONTRACT = {
         "timeout_sec": 1800,
         "sandbox": "read-only",
     },
-    "max_rounds": 5,
+    "max_rounds": 0,  # 0 = unlimited (until consensus)
     "after_approval": "present_plan_only",
 }
 
@@ -118,7 +118,7 @@ present_plan_only | execute_plan
 ## Stop Conditions
 - Codex returns approved=true with zero major issues
 - Repeated disagreement (2+ rounds on same issue) → ask user
-- max_rounds reached → ask user
+- max_rounds reached → ask user (set max_rounds=0 for unlimited)
 """
 
 # ---------------------------------------------------------------------------
@@ -456,8 +456,105 @@ def build_retry_prompt() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Transport
+# Transport (streaming with live progress)
 # ---------------------------------------------------------------------------
+
+def _stream_codex(
+    cmd: list[str],
+    prompt: str,
+    timeout_sec: int,
+    output_path: Path,
+) -> int:
+    """Run a codex command, stream JSONL, print live progress.
+
+    Returns exit code (-1 on timeout).
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    start = time.monotonic()
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except FileNotFoundError:
+        print("Error: codex command not found")
+        save_text(output_path, "")
+        return -1
+
+    # Send prompt and close stdin
+    if proc.stdin:
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+
+    lines: list[str] = []
+    last_heartbeat = start
+    files_read: list[str] = []
+    commands_run: list[str] = []
+
+    try:
+        while True:
+            # Check timeout
+            elapsed = time.monotonic() - start
+            if elapsed > timeout_sec:
+                proc.kill()
+                proc.wait()
+                save_text(output_path, "\n".join(lines))
+                print(f"\n  Timed out after {int(elapsed)}s")
+                return -1
+
+            line = proc.stdout.readline() if proc.stdout else ""
+            if not line and proc.poll() is not None:
+                break
+            if not line:
+                continue
+
+            lines.append(line.rstrip())
+
+            # Parse event for live progress
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            etype = event.get("type", "")
+
+            # Heartbeat every 15 seconds
+            if time.monotonic() - last_heartbeat >= 15:
+                elapsed_s = int(time.monotonic() - start)
+                print(f"  ... reviewing ({elapsed_s}s elapsed)", flush=True)
+                last_heartbeat = time.monotonic()
+
+            # Track file reads
+            if etype == "item.completed":
+                item = event.get("item", {})
+                if item.get("type") == "command_execution":
+                    cmd_text = item.get("command", "")
+                    # Detect file reads (cat, sed, head, etc.)
+                    if any(r in cmd_text for r in ["cat ", "sed ", "head ", "tail "]):
+                        short = cmd_text.split('"')[-2] if '"' in cmd_text else cmd_text[:80]
+                        if short not in files_read:
+                            files_read.append(short)
+                            print(f"  [read] {short}", flush=True)
+                    elif cmd_text and cmd_text not in commands_run:
+                        commands_run.append(cmd_text)
+                        short_cmd = cmd_text[:100] + ("..." if len(cmd_text) > 100 else "")
+                        print(f"  [exec] {short_cmd}", flush=True)
+
+    except KeyboardInterrupt:
+        proc.kill()
+        proc.wait()
+        save_text(output_path, "\n".join(lines))
+        return -1
+
+    save_text(output_path, "\n".join(lines) + "\n" if lines else "")
+    elapsed_s = int(time.monotonic() - start)
+    print(f"  Codex finished in {elapsed_s}s", flush=True)
+    return proc.returncode or 0
+
 
 def run_codex_fresh(
     prompt: str,
@@ -468,7 +565,7 @@ def run_codex_fresh(
     model: str | None = None,
     reasoning_effort: str | None = None,
 ) -> int:
-    """Run fresh codex exec. Returns exit code."""
+    """Run fresh codex exec with live progress."""
     cmd = ["codex", "exec"]
     cmd.extend(["--sandbox", sandbox])
     cmd.append("--json")
@@ -479,19 +576,8 @@ def run_codex_fresh(
         cmd.extend(["--reasoning-effort", reasoning_effort])
     cmd.append("-")
 
-    try:
-        result = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-        )
-        save_text(output_path, result.stdout)
-        return result.returncode
-    except subprocess.TimeoutExpired:
-        save_text(output_path, "")
-        return -1
+    print(f"  Starting fresh review (sandbox: {sandbox})...", flush=True)
+    return _stream_codex(cmd, prompt, timeout_sec, output_path)
 
 
 def run_codex_resume(
@@ -502,7 +588,7 @@ def run_codex_resume(
     model: str | None = None,
     reasoning_effort: str | None = None,
 ) -> int:
-    """Run codex exec resume. Returns exit code."""
+    """Run codex exec resume with live progress."""
     cmd = ["codex", "exec", "resume"]
     cmd.append("--json")
     if model:
@@ -512,19 +598,8 @@ def run_codex_resume(
     cmd.append(thread_id)
     cmd.append("-")
 
-    try:
-        result = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-        )
-        save_text(output_path, result.stdout)
-        return result.returncode
-    except subprocess.TimeoutExpired:
-        save_text(output_path, "")
-        return -1
+    print(f"  Resuming session {thread_id[:12]}...", flush=True)
+    return _stream_codex(cmd, prompt, timeout_sec, output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -596,9 +671,9 @@ def cmd_review(
     state = load_json(work_path(STATE_FILE))
 
     current_round = state["current_round"] + 1
-    max_rounds = contract.get("max_rounds", 5)
+    max_rounds = contract.get("max_rounds", 0)  # 0 = unlimited (until consensus)
 
-    if current_round > max_rounds:
+    if max_rounds > 0 and current_round > max_rounds:
         print(f"Max rounds ({max_rounds}) reached.")
         state["status"] = "blocked"
         state["last_verdict"] = "blocked"
@@ -804,11 +879,35 @@ def cmd_review(
 
     # --- Output ---
     confidence = review.get("confidence", 0)
-    n_issues = len(review.get("issues", []))
-    major_count = sum(1 for i in review.get("issues", []) if i.get("severity") == "major")
+    issues = review.get("issues", [])
+    n_issues = len(issues)
+    major_count = sum(1 for i in issues if i.get("severity") == "major")
+    minor_count = sum(1 for i in issues if i.get("severity") == "minor")
+    nit_count = sum(1 for i in issues if i.get("severity") == "nit")
 
-    print(f"Round {current_round} | {verdict} | confidence: {confidence:.2f} | "
-          f"issues: {n_issues} ({major_count} major)")
+    print()
+    print(f"{'=' * 60}")
+    print(f"Round {current_round} | {verdict} | confidence: {confidence:.2f}")
+    print(f"Issues: {major_count} major, {minor_count} minor, {nit_count} nit")
+    print(f"{'=' * 60}")
+
+    if issues:
+        for issue in issues:
+            sev = issue.get("severity", "?").upper()
+            iid = issue.get("issue_id", "?")
+            desc = issue.get("description", "")
+            # Truncate long descriptions
+            if len(desc) > 120:
+                desc = desc[:117] + "..."
+            print(f"  [{sev}] {iid}")
+            print(f"        {desc}")
+        print()
+
+    summary = review.get("summary", "")
+    if summary:
+        print(f"Summary: {summary}")
+        print()
+
     print(f"Review saved: {review_path}")
 
     return exit_rc
