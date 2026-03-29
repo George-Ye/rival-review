@@ -14,6 +14,7 @@ Usage:
 import argparse
 import json
 import os
+import selectors
 import shutil
 import subprocess
 import sys
@@ -469,6 +470,9 @@ def _stream_codex(
 ) -> int:
     """Run a codex command, stream JSONL, print live progress.
 
+    Uses selectors for non-blocking I/O so timeout and heartbeat
+    always work even when Codex produces no output for long periods.
+
     Returns exit code (-1 on timeout).
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -483,7 +487,7 @@ def _stream_codex(
             text=True,
         )
     except FileNotFoundError:
-        print("Error: codex command not found")
+        print("  Error: codex command not found")
         save_text(output_path, "")
         return -1
 
@@ -497,10 +501,16 @@ def _stream_codex(
     files_read: list[str] = []
     commands_run: list[str] = []
 
+    # Non-blocking I/O via selectors
+    sel = selectors.DefaultSelector()
+    if proc.stdout:
+        sel.register(proc.stdout, selectors.EVENT_READ)
+
     try:
         while True:
-            # Check timeout
             elapsed = time.monotonic() - start
+
+            # Check timeout
             if elapsed > timeout_sec:
                 proc.kill()
                 proc.wait()
@@ -508,11 +518,24 @@ def _stream_codex(
                 print(f"\n  Timed out after {int(elapsed)}s")
                 return -1
 
-            line = proc.stdout.readline() if proc.stdout else ""
-            if not line and proc.poll() is not None:
-                break
-            if not line:
+            # Heartbeat every 15 seconds (runs even when no output)
+            if time.monotonic() - last_heartbeat >= 15:
+                elapsed_s = int(time.monotonic() - start)
+                print(f"  ... reviewing ({elapsed_s}s elapsed)", flush=True)
+                last_heartbeat = time.monotonic()
+
+            # Non-blocking: wait up to 1 second for data
+            ready = sel.select(timeout=1.0)
+            if not ready:
+                # No data available — check if process exited
+                if proc.poll() is not None:
+                    break
                 continue
+
+            line = proc.stdout.readline() if proc.stdout else ""
+            if not line:
+                # EOF
+                break
 
             lines.append(line.rstrip())
 
@@ -524,18 +547,11 @@ def _stream_codex(
 
             etype = event.get("type", "")
 
-            # Heartbeat every 15 seconds
-            if time.monotonic() - last_heartbeat >= 15:
-                elapsed_s = int(time.monotonic() - start)
-                print(f"  ... reviewing ({elapsed_s}s elapsed)", flush=True)
-                last_heartbeat = time.monotonic()
-
-            # Track file reads
+            # Track file reads and commands
             if etype == "item.completed":
                 item = event.get("item", {})
                 if item.get("type") == "command_execution":
                     cmd_text = item.get("command", "")
-                    # Detect file reads (cat, sed, head, etc.)
                     if any(r in cmd_text for r in ["cat ", "sed ", "head ", "tail "]):
                         short = cmd_text.split('"')[-2] if '"' in cmd_text else cmd_text[:80]
                         if short not in files_read:
@@ -551,7 +567,15 @@ def _stream_codex(
         proc.wait()
         save_text(output_path, "\n".join(lines))
         return -1
+    finally:
+        sel.close()
 
+    # Drain any remaining output
+    if proc.stdout:
+        for line in proc.stdout:
+            lines.append(line.rstrip())
+
+    proc.wait()
     save_text(output_path, "\n".join(lines) + "\n" if lines else "")
     elapsed_s = int(time.monotonic() - start)
     print(f"  Codex finished in {elapsed_s}s", flush=True)
@@ -578,7 +602,12 @@ def run_codex_fresh(
         cmd.extend(["--reasoning-effort", reasoning_effort])
     cmd.append("-")
 
-    print(f"  Starting fresh review (sandbox: {sandbox})...", flush=True)
+    model_info = f"model: {model}" if model else "model: codex-default"
+    re_info = f"reasoning: {reasoning_effort}" if reasoning_effort else ""
+    info_parts = [f"sandbox: {sandbox}", model_info]
+    if re_info:
+        info_parts.append(re_info)
+    print(f"  Starting fresh review ({', '.join(info_parts)})...", flush=True)
     return _stream_codex(cmd, prompt, timeout_sec, output_path)
 
 
@@ -600,7 +629,9 @@ def run_codex_resume(
     cmd.append(thread_id)
     cmd.append("-")
 
-    print(f"  Resuming session {thread_id[:12]}...", flush=True)
+    model_info = f"model: {model}" if model else "model: codex-default"
+    re_info = f", reasoning: {reasoning_effort}" if reasoning_effort else ""
+    print(f"  Resuming session {thread_id[:12]}... ({model_info}{re_info})", flush=True)
     return _stream_codex(cmd, prompt, timeout_sec, output_path)
 
 
@@ -699,7 +730,17 @@ def cmd_review(
     pre_snapshot = git_workspace_snapshot()
 
     # --- Prepare round directory ---
+    # If a previous failed attempt left files here, archive it first
     rdir = round_dir(current_round)
+    if rdir.exists() and (rdir / "transport.json").exists():
+        attempt = 1
+        while True:
+            archive = rdir.parent / f"round-{current_round:03d}-attempt-{attempt}"
+            if not archive.exists():
+                break
+            attempt += 1
+        rdir.rename(archive)
+        print(f"  Previous failed attempt archived to {archive.name}/")
     rdir.mkdir(parents=True, exist_ok=True)
 
     # Save prompt and contract snapshot
@@ -895,6 +936,14 @@ def cmd_review(
     print(f"{'=' * 60}")
     print(f"Round {current_round} | {verdict} | confidence: {confidence:.2f}")
     print(f"Issues: {major_count} major, {minor_count} minor, {nit_count} nit")
+    transport_line = f"Transport: {actual_transport}"
+    if fell_back:
+        transport_line += " (fallback from resume)"
+    model_line = f"Model: {effective_model or 'codex-default'}"
+    if effective_reasoning:
+        model_line += f" | reasoning: {effective_reasoning}"
+    print(transport_line)
+    print(model_line)
     print(f"{'=' * 60}")
 
     if issues:
