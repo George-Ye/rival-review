@@ -45,6 +45,9 @@ EXIT_INSUFFICIENT_CONTEXT = 4
 VALID_VERDICTS = {"approved", "needs_revision", "insufficient_context"}
 VALID_SEVERITIES = {"major", "minor", "nit"}
 
+# System criterion IDs always valid regardless of contract
+SYSTEM_CRITERION_IDS = {"source_availability"}
+
 REQUIRED_REVIEW_FIELDS = {"approved", "verdict", "round", "issues", "summary", "confidence"}
 REQUIRED_ISSUE_FIELDS = {
     "issue_id", "severity", "criterion_id",
@@ -192,7 +195,7 @@ def validate_sources(contract: dict, workspace: Path) -> list[str]:
             errors.append(f"source_manifest: absolute path or URL not allowed: {src}")
             continue
         resolved = (workspace / src).resolve()
-        if not str(resolved).startswith(str(workspace_real)):
+        if not resolved.is_relative_to(workspace_real):
             errors.append(f"source_manifest: path escapes workspace: {src}")
             continue
         if not resolved.exists():
@@ -255,7 +258,19 @@ def validate_review(obj: dict, contract: dict) -> list[str]:
     if "confidence" in obj and not isinstance(obj.get("confidence"), (int, float)):
         errors.append("confidence must be number")
 
-    valid_criteria = {c["id"] for c in contract.get("review_criteria", [])}
+    # Verdict/approved consistency check
+    verdict = obj.get("verdict")
+    approved = obj.get("approved")
+    if verdict is not None and approved is not None:
+        if verdict == "approved" and not approved:
+            errors.append("verdict is 'approved' but approved is false — contradictory")
+        if verdict != "approved" and approved:
+            errors.append(f"verdict is '{verdict}' but approved is true — contradictory")
+
+    valid_criteria = (
+        {c["id"] for c in contract.get("review_criteria", [])}
+        | SYSTEM_CRITERION_IDS
+    )
 
     for i, issue in enumerate(obj.get("issues", [])):
         if not isinstance(issue, dict):
@@ -623,7 +638,6 @@ def cmd_review(
         shutil.copy2(rev_summary, rdir / "revision-summary.md")
 
     # --- Transport ---
-    raw_path = rdir / "raw.jsonl"
     schema_path = work_path(SCHEMA_FILE)
 
     requested_transport = "resume" if use_resume else "fresh"
@@ -631,167 +645,70 @@ def cmd_review(
     fell_back = False
     retry_count = 0
     thread_id = state.get("active_thread_id")
+    review = None
 
     started_at = now_iso()
 
     if use_resume and allow_resume and thread_id:
-        # Try resume
+        # Try resume — each attempt gets its own raw file
+        resume_raw = rdir / "raw-resume.jsonl"
         exit_code = run_codex_resume(
-            prompt, thread_id, timeout_sec, raw_path,
+            prompt, thread_id, timeout_sec, resume_raw,
             model=model, reasoning_effort=reasoning_effort,
         )
         if exit_code == 0:
             actual_transport = "resume"
-            tid, review = parse_codex_output(raw_path)
+            tid, review = parse_codex_output(resume_raw)
             if review:
                 val_errors = validate_review(review, contract)
-                if not val_errors:
-                    # Resume succeeded
-                    pass
-                else:
-                    # Invalid JSON, retry once
+                if val_errors:
+                    # Invalid, retry once in same session
+                    retry_raw = rdir / "raw-retry.jsonl"
                     retry_prompt = build_retry_prompt()
                     retry_count = 1
                     exit_code = run_codex_resume(
-                        retry_prompt, thread_id, timeout_sec, raw_path,
+                        retry_prompt, thread_id, timeout_sec, retry_raw,
                         model=model, reasoning_effort=reasoning_effort,
                     )
                     if exit_code == 0:
-                        tid, review = parse_codex_output(raw_path)
-                        if review:
-                            val_errors = validate_review(review, contract)
-                            if val_errors:
-                                review = None  # will fallback
-                        else:
-                            review = None
+                        tid, review = parse_codex_output(retry_raw)
+                        if review and validate_review(review, contract):
+                            review = None  # still invalid
                     else:
                         review = None
-            # If review is still None after retry, fallback
             if review is None:
                 fell_back = True
         else:
             fell_back = True
 
         if fell_back:
+            # Fallback to fresh — gets its own raw file
             actual_transport = "fresh"
+            fresh_raw = rdir / "raw-fresh.jsonl"
             exit_code = run_codex_fresh(
-                prompt, schema_path, timeout_sec, sandbox, raw_path,
+                prompt, schema_path, timeout_sec, sandbox, fresh_raw,
                 model=model, reasoning_effort=reasoning_effort,
             )
+            if exit_code >= 0:
+                thread_id_new, review = parse_codex_output(fresh_raw)
+                if thread_id_new:
+                    thread_id = thread_id_new
     else:
         # Default: fresh exec
+        fresh_raw = rdir / "raw.jsonl"
         exit_code = run_codex_fresh(
-            prompt, schema_path, timeout_sec, sandbox, raw_path,
+            prompt, schema_path, timeout_sec, sandbox, fresh_raw,
             model=model, reasoning_effort=reasoning_effort,
         )
+        if exit_code >= 0:
+            thread_id_new, review = parse_codex_output(fresh_raw)
+            if thread_id_new:
+                thread_id = thread_id_new
 
     finished_at = now_iso()
 
-    # --- Parse output ---
-    if actual_transport == "fresh" or fell_back:
-        thread_id_new, review = parse_codex_output(raw_path)
-        if thread_id_new:
-            thread_id = thread_id_new
-
-    if exit_code == -1:
-        print(f"Error: Codex call timed out after {timeout_sec}s")
-        state["status"] = "error"
-        state["last_verdict"] = "error"
-        state["current_round"] = current_round
-        state["updated_at"] = now_iso()
-        save_json(work_path(STATE_FILE), state)
-        # Save transport metadata
-        save_json(rdir / "transport.json", {
-            "round": current_round,
-            "requested_transport": requested_transport,
-            "actual_transport": actual_transport,
-            "fell_back_from_resume": fell_back,
-            "retry_count": retry_count,
-            "thread_id": thread_id,
-            "model": model,
-            "reasoning_effort": reasoning_effort,
-            "timeout_sec": timeout_sec,
-            "sandbox": sandbox if actual_transport == "fresh" else None,
-            "exit_code": exit_code,
-            "started_at": started_at,
-            "finished_at": finished_at,
-        })
-        return EXIT_ERROR
-
-    if review is None:
-        print("Error: Could not extract valid review from Codex output.")
-        print(f"Raw output saved to: {raw_path}")
-        state["status"] = "error"
-        state["last_verdict"] = "error"
-        state["current_round"] = current_round
-        state["updated_at"] = now_iso()
-        save_json(work_path(STATE_FILE), state)
-        save_json(rdir / "transport.json", {
-            "round": current_round,
-            "requested_transport": requested_transport,
-            "actual_transport": actual_transport,
-            "fell_back_from_resume": fell_back,
-            "retry_count": retry_count,
-            "thread_id": thread_id,
-            "model": model,
-            "reasoning_effort": reasoning_effort,
-            "timeout_sec": timeout_sec,
-            "sandbox": sandbox if actual_transport == "fresh" else None,
-            "exit_code": exit_code,
-            "started_at": started_at,
-            "finished_at": finished_at,
-        })
-        return EXIT_ERROR
-
-    # --- Validate review ---
-    val_errors = validate_review(review, contract)
-    if val_errors:
-        print("Warning: Review has validation issues:")
-        for e in val_errors:
-            print(f"  - {e}")
-        # Still save but mark as error if critical fields missing
-        if any("missing required field" in e for e in val_errors):
-            print("Error: Review missing critical fields. Not saving as latest.")
-            state["status"] = "error"
-            state["last_verdict"] = "error"
-            state["current_round"] = current_round
-            state["updated_at"] = now_iso()
-            save_json(work_path(STATE_FILE), state)
-            save_json(rdir / "review.json", review)
-            save_json(rdir / "transport.json", {
-                "round": current_round,
-                "requested_transport": requested_transport,
-                "actual_transport": actual_transport,
-                "fell_back_from_resume": fell_back,
-                "retry_count": retry_count,
-                "thread_id": thread_id,
-                "model": model,
-                "reasoning_effort": reasoning_effort,
-                "timeout_sec": timeout_sec,
-                "sandbox": sandbox if actual_transport == "fresh" else None,
-                "exit_code": exit_code,
-                "started_at": started_at,
-                "finished_at": finished_at,
-            })
-            return EXIT_ERROR
-
-    # --- Post-review guard ---
-    post_snapshot = git_workspace_snapshot()
-    if pre_snapshot != post_snapshot:
-        print("ABORT: Workspace was modified during review.")
-        print("Pre-review and post-review git status differ.")
-        state["status"] = "error"
-        state["last_verdict"] = "error"
-        state["updated_at"] = now_iso()
-        save_json(work_path(STATE_FILE), state)
-        return EXIT_ERROR
-
-    # --- Save results ---
-    save_json(rdir / "review.json", review)
-    save_json(work_path(LATEST_REVIEW_FILE), review)
-
-    # Transport metadata
-    save_json(rdir / "transport.json", {
+    # --- Build transport metadata (saved on all paths) ---
+    transport_meta = {
         "round": current_round,
         "requested_transport": requested_transport,
         "actual_transport": actual_transport,
@@ -805,7 +722,58 @@ def cmd_review(
         "exit_code": exit_code,
         "started_at": started_at,
         "finished_at": finished_at,
-    })
+    }
+    save_json(rdir / "transport.json", transport_meta)
+
+    # --- Error: timeout ---
+    if exit_code == -1:
+        print(f"Error: Codex call timed out after {timeout_sec}s")
+        # Do NOT increment current_round on transport failure
+        state["status"] = "error"
+        state["last_verdict"] = "error"
+        state["updated_at"] = now_iso()
+        save_json(work_path(STATE_FILE), state)
+        return EXIT_ERROR
+
+    # --- Error: no review extracted ---
+    if review is None:
+        print("Error: Could not extract valid review from Codex output.")
+        print(f"Raw output saved to: {rdir}/")
+        # Do NOT increment current_round on parse failure
+        state["status"] = "error"
+        state["last_verdict"] = "error"
+        state["updated_at"] = now_iso()
+        save_json(work_path(STATE_FILE), state)
+        return EXIT_ERROR
+
+    # --- Strict validation: ALL errors block ---
+    val_errors = validate_review(review, contract)
+    if val_errors:
+        print("Error: Review failed strict validation:")
+        for e in val_errors:
+            print(f"  - {e}")
+        # Save the invalid review for debugging but do NOT advance round
+        save_json(rdir / "review.json", review)
+        state["status"] = "error"
+        state["last_verdict"] = "error"
+        state["updated_at"] = now_iso()
+        save_json(work_path(STATE_FILE), state)
+        return EXIT_ERROR
+
+    # --- Post-review guard ---
+    post_snapshot = git_workspace_snapshot()
+    if pre_snapshot != post_snapshot:
+        print("ABORT: Workspace was modified during review.")
+        print("Pre-review and post-review git status differ.")
+        state["status"] = "error"
+        state["last_verdict"] = "error"
+        state["updated_at"] = now_iso()
+        save_json(work_path(STATE_FILE), state)
+        return EXIT_ERROR
+
+    # --- Success: save results and advance round ---
+    save_json(rdir / "review.json", review)
+    save_json(work_path(LATEST_REVIEW_FILE), review)
 
     # --- Determine verdict ---
     verdict = review.get("verdict", "needs_revision")
