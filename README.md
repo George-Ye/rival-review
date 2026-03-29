@@ -1,31 +1,37 @@
 # rival-review
 
-A Claude Code skill that orchestrates cross-model plan review: **Claude Code writes plans, Codex CLI reviews them**, looping automatically until both models reach consensus.
+Cross-model review for any document: **Claude Code writes, Codex CLI reviews**, automated loop until consensus.
 
-## Why
-
-Single-model planning has blind spots. This skill adds an independent reviewer (OpenAI Codex) that reads your actual codebase — not just the plan text — to catch issues before you execute.
+Works for code plans, novel outlines, product specs, marketing copy — anything that benefits from an independent reviewer.
 
 ## How It Works
 
 ```
-You (user)          Claude Code (planner)         Codex CLI (reviewer)
-    |                      |                            |
-    |--- "build X" -----→ |                            |
-    |                      |--- goal.md + plan.md ---→  |
-    |                      |                            |--- reads code
-    |                      |                            |--- reviews plan
-    |                      | ←--- review.json ---------|
-    |                      |                            |
-    |                      |--- revise plan ----------→ |
-    |                      | ←--- approved! ------------|
-    |                      |                            |
-    | ←-- "approved. go?"  |                            |
-    |--- "yes" ---------→  |                            |
-    |                      |--- executes plan           |
+You (user)          Claude Code (author)          rival_review.py          Codex CLI (reviewer)
+    |                      |                            |                        |
+    |--- "review X" ----→  |                            |                        |
+    |                      |--- fills goal.md -------→  |                        |
+    |                      |--- fills contract.json --→ |                        |
+    |                      |--- writes draft ---------→ |                        |
+    |                      |                            |                        |
+    |                      |--- review ---------------→ |--- codex exec ------→  |
+    |                      |                            |                        |--- reads sources
+    |                      |                            |                        |--- reviews draft
+    |                      |                            | ←--- JSONL ------------|
+    |                      |                            |--- parse + validate    |
+    |                      |                            |--- archive to history  |
+    |                      | ←--- exit code + review ---|                        |
+    |                      |                            |                        |
+    |                      |--- revise draft --------→  |                        |
+    |                      |--- review ---------------→ |--- codex exec ------→  |
+    |                      | ←--- approved! ------------|                        |
+    |                      |                            |                        |
+    | ←-- "approved. go?"  |                            |                        |
 ```
 
-All intermediate state lives in `.plan-review/` — file-based, not memory-based.
+- **Claude Code** handles user interaction, drafting, and decision-making
+- **rival_review.py** handles Codex transport, JSONL parsing, validation, and archiving
+- **Codex CLI** reviews the draft against real source materials
 
 ## Requirements
 
@@ -33,81 +39,123 @@ All intermediate state lives in `.plan-review/` — file-based, not memory-based
 |------------|---------|----------|
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | latest | yes |
 | [Codex CLI](https://github.com/openai/codex) | >= 0.97.0 | yes |
-| [jq](https://jqlang.github.io/jq/) | >= 1.6 | yes |
+| Python 3 | >= 3.9 | yes |
+
+No pip packages needed. Zero external Python dependencies.
 
 ## Install
 
 ```bash
-claude plugin add /path/to/rival-review
-```
-
-Or clone and add:
-
-```bash
-git clone https://github.com/yourname/rival-review.git
+git clone https://github.com/George-Ye/rival-review.git
 claude plugin add ./rival-review
 ```
 
-## Usage
+## Quick Start
 
-In Claude Code, invoke the skill when you want a reviewed plan:
+```bash
+# 1. Initialize (scaffolds .rival-review/ with empty templates)
+python3 rival_review.py init
 
+# 2. Claude fills in goal.md, contract.json, and current-draft.md
+#    (this happens through the skill, not manually)
+
+# 3. Run review
+python3 rival_review.py review
+
+# 4. Check status
+python3 rival_review.py status
+# → Round 1 | needs_revision | confidence: 0.95 | issues: 3 (2 major)
+
+# 5. Claude revises draft, then reviews again
+python3 rival_review.py review
+
+# 6. Repeat until approved (exit code 0)
 ```
-/rival-review
-```
 
-Or describe your task and ask for a reviewed plan — the skill triggers when
-Claude Code recognizes the need for cross-model review.
-
-### Example Session
+## Example Session
 
 ```
 You:    I need to refactor the auth middleware. Use rival-review.
-Claude: [Phase 0] What's the objective? Any constraints or off-limits areas?
-You:    Goal: replace session tokens with JWTs. Don't touch the user model.
-Claude: [Phase 1] Plan written to .plan-review/current-plan.md
-Claude: [Phase 2] Sending to Codex for review...
+Claude: [Phase 0] What's the objective? Any constraints?
+You:    Replace session tokens with JWTs. Don't touch the user model.
+Claude: [Phase 1] Draft written. Starting review...
+Claude: $ python3 rival_review.py review
+        Round 1 | needs_revision | confidence: 0.90 | issues: 3 (2 major)
 Claude: Codex found 2 major issues — missing token rotation, no logout invalidation.
-Claude: [Phase 3] Revising plan...
-Claude: Codex approved (confidence: 0.92, 2 rounds). Execute?
+Claude: [Phase 3] Revising draft...
+Claude: $ python3 rival_review.py review
+        Round 2 | approved | confidence: 0.95 | issues: 1 (0 major)
+Claude: Codex approved (confidence: 0.95, 2 rounds). Execute?
 You:    yes
-Claude: [Phase 5] Executing...
 ```
 
-## Architecture
+## Directory Structure
 
 ```
-.plan-review/
-├── goal.md               # Shared contract (objectives, constraints, stop conditions)
-├── current-plan.md       # Latest plan version
-├── latest-review.json    # Most recent Codex review
-├── revision-summary.md   # What changed in latest revision
-├── review-schema.json    # JSON schema for structured review output
-├── codex-session.json    # Session tracking (thread_id, round, status)
+.rival-review/
+├── goal.md                    # Human-readable shared contract
+├── contract.json              # Machine contract (criteria, sources, transport)
+├── review-schema.json         # JSON schema for Codex output
+├── state.json                 # Runner state (round, verdict, thread_id)
+├── current-draft.md           # The document being reviewed
+├── revision-summary.md        # What changed in latest revision
+├── latest-review.json         # Most recent review
+├── sources/                   # Pre-fetched external materials
 └── history/
-    ├── round-1-plan.md
-    ├── round-1-review.json
-    └── ...
+    └── round-001/
+        ├── draft.md           # Draft snapshot
+        ├── prompt.md          # Full prompt sent to Codex
+        ├── raw.jsonl          # Raw Codex JSONL output
+        ├── raw-resume.jsonl   # (if --resume was attempted)
+        ├── raw-retry.jsonl    # (if retry was needed)
+        ├── raw-fresh.jsonl    # (if fallback to fresh)
+        ├── review.json        # Extracted structured review
+        ├── transport.json     # Transport metadata
+        ├── contract.json      # Contract snapshot
+        └── goal.md            # Goal snapshot
 ```
 
-### Key Design Decisions
+## CLI Reference
 
-- **Files are truth** — all state persisted to disk, not model memory
-- **Codex reviews real code** — prompts require reading source files, not just plan text
-- **Stateful with fallback** — prefers `resume` for context continuity, falls back to fresh `exec --sandbox read-only` on failure
+| Command | Description |
+|---------|-------------|
+| `rival-review init` | Scaffold `.rival-review/` with empty templates |
+| `rival-review review` | Run one review round (fresh exec, default) |
+| `rival-review review --resume` | Attempt to resume previous Codex session |
+| `rival-review review --timeout 600` | Override timeout (seconds) |
+| `rival-review review --model o3` | Override Codex model |
+| `rival-review status` | Show current round, verdict, transport info |
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | approved — no major issues |
+| 1 | needs_revision — has issues to fix |
+| 2 | error — transport or parse failure |
+| 3 | blocked — max rounds reached |
+| 4 | insufficient_context — missing source materials |
+
+## Key Design Decisions
+
+- **Fresh exec is default** — `--sandbox read-only` + `--output-schema` guaranteed. `--resume` is opt-in.
+- **Files are truth** — all state on disk, not model memory
+- **Strict validation** — all schema errors block, no warn-and-continue
+- **Failed rounds don't count** — transport failures don't consume round quota
 - **Workspace guard** — `git status` checked before/after every Codex call
-- **User decides conflicts** — 2+ rounds on the same issue escalates to user
+- **Separate raw files** — resume, retry, and fresh each get their own JSONL for debugging
+- **Domain-agnostic** — reviewer role and criteria configured per document type
 
 ## Compatibility
 
 Tested with:
 - Codex CLI 0.97.0
 - Claude Code (latest)
-- macOS (no `tac` dependency, uses `jq -s` for portability)
+- Python 3.9+ on macOS
 
-JSONL event format is based on Codex CLI 0.97.0. If Codex changes its
-event schema in future versions, the parsing logic in SKILL.md may need
-updating.
+JSONL event format is based on Codex CLI 0.97.0. If the event schema
+changes in future versions, `parse_codex_output()` in `rival_review.py`
+may need updating.
 
 ## License
 
