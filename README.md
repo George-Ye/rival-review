@@ -46,8 +46,9 @@ No pip packages needed. Zero external Python dependencies.
 ## Install
 
 ```bash
-git clone https://github.com/George-Ye/rival-review.git
-claude plugin add ./rival-review
+# Add the marketplace and install
+claude plugin marketplace add https://github.com/George-Ye/rival-review
+claude plugin install rival-review
 ```
 
 ## Quick Start
@@ -136,15 +137,31 @@ You:    yes
 | 3 | blocked — max rounds reached |
 | 4 | insufficient_context — missing source materials |
 
+## Defaults
+
+| Setting | Default | Source |
+|---------|---------|-------|
+| Model | gpt-5.4 | contract.json |
+| Reasoning effort | xhigh | contract.json |
+| Timeout | 1800s (30 min) | contract.json |
+| Max rounds | 0 (unlimited) | contract.json |
+| Transport | fresh exec | - |
+
+CLI flags (`--model`, `--timeout`) override contract.json values.
+
 ## Key Design Decisions
 
+- **Equal roles** — Claude (author) and Codex (reviewer) are peers, not superior/subordinate. User is final arbiter.
+- **Independent judgment** — Claude can accept, partially accept, reject, or defer any issue, regardless of severity. Rejections must cite evidence.
 - **Fresh exec is default** — `--sandbox read-only` + `--output-schema` guaranteed. `--resume` is opt-in.
+- **Explicit model config** — gpt-5.4 xhigh specified in contract.json, not inherited from CLI defaults.
 - **Files are truth** — all state on disk, not model memory
 - **Strict validation** — all schema errors block, no warn-and-continue
 - **Failed rounds don't count** — transport failures don't consume round quota
 - **Workspace guard** — `git status` checked before/after every Codex call
 - **Separate raw files** — resume, retry, and fresh each get their own JSONL for debugging
 - **Domain-agnostic** — reviewer role and criteria configured per document type
+- **User visibility** — key info (verdict, issues, disagreements) surfaced by default; raw JSONL noise suppressed
 
 ## Compatibility
 

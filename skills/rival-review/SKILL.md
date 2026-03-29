@@ -5,8 +5,16 @@ description: Use when any document, plan, or draft needs cross-model review — 
 
 # Rival Review
 
-You (Claude Code) = author + orchestrator.
-Codex CLI = independent reviewer.
+## Role Model
+
+- **Claude Code** = author + orchestrator. Writes drafts, revises, makes judgment calls.
+- **Codex CLI** = independent reviewer. Reviews drafts, flags issues, challenges the author.
+- **User** = final arbiter. Resolves disagreements, approves execution.
+
+Claude and Codex are **equals with different roles**, not superior and subordinate.
+Codex does not have final say. Claude does not blindly obey.
+When they disagree and neither backs down, the user decides.
+
 `rival_review.py` = runner that handles transport, parsing, validation, archiving.
 
 - `.rival-review/goal.md` = human-readable shared contract
@@ -74,9 +82,11 @@ Write machine-readable contract to `.rival-review/contract.json`:
   "transport": {
     "allow_resume": true,
     "timeout_sec": 1800,
-    "sandbox": "read-only"
+    "sandbox": "read-only",
+    "model": "gpt-5.4",
+    "reasoning_effort": "xhigh"
   },
-  "max_rounds": 5,
+  "max_rounds": 0,
   "after_approval": "execute_plan"
 }
 ```
@@ -120,8 +130,9 @@ python3 rival_review.py review
 ```
 
 The runner handles everything:
-- Builds the Codex prompt dynamically from `contract.json`
+- Reads model (`gpt-5.4`) and reasoning effort (`xhigh`) from `contract.json`
 - Calls `codex exec --sandbox read-only --json --output-schema ...`
+- Streams live progress (heartbeat, file reads, commands)
 - Parses JSONL, extracts thread_id and review
 - Validates review against strict schema (all errors block)
 - Saves raw output, review, transport metadata, and snapshots to history
@@ -147,22 +158,32 @@ python3 rival_review.py status
 
 ### Phase 3 — Revision Loop
 
-#### 3a. Revise (with independent judgment)
+#### 3a. Revise (as an equal, not a subordinate)
 
-Read `.rival-review/latest-review.json` and **critically evaluate each issue**.
-You are not Codex's subordinate — you are an equal participant in a dialogue.
+Read `.rival-review/latest-review.json`.
 
-For each issue, independently decide:
-- **Agree and fix** — the issue is valid, change the draft
-- **Partially agree** — the concern is real but the suggested fix is wrong;
-  apply your own solution and explain why
-- **Disagree and defend** — the issue is incorrect, unnecessary, or based on
-  a misunderstanding; explain your reasoning clearly so Codex can reconsider
+**You and Codex are equals.** You are the author; Codex is the reviewer.
+Neither has authority over the other. The user is the final arbiter.
 
-Do NOT blindly accept all issues. Ask yourself:
-- Is this issue actually a problem, or is Codex being overly cautious?
-- Does the suggested fix make the draft better or worse?
-- Is Codex applying the right criteria, or misinterpreting the goal?
+**Every issue must be accounted for.** For each `issue_id` in the review,
+you MUST place it in exactly one of these buckets — no issue may be skipped:
+
+- **Accept** — the issue is valid. Fix it in the draft.
+- **Partially accept** — the concern has merit but the suggested fix is wrong
+  or excessive. Apply your own solution.
+- **Reject** — the issue is incorrect, unnecessary, or misunderstands the goal.
+- **Defer** — valid but out of scope for this round.
+
+**Any severity can be rejected.** Including `major`. There is no rule that
+major issues must be accepted. The only requirement is that your reasoning
+must be substantive.
+
+**Rejections and partial accepts must cite evidence.** You cannot just say
+"I disagree." You must reference at least one of:
+- `goal.md` — "The goal explicitly says X, so this issue doesn't apply"
+- `contract.json` — "The criteria definition for Y means Z"
+- Source manifest materials — "The actual code at path X shows Y"
+- `current-draft.md` — "Step N already covers this because..."
 
 Update `.rival-review/current-draft.md` with your changes.
 
@@ -170,24 +191,26 @@ Write `.rival-review/revision-summary.md`:
 ```markdown
 # Round N Revision
 
-## Accepted and Fixed
-- [major] <issue_id>: <what changed and why you agree>
+## Accepted
+- [major] <issue_id>: <what changed and why>
 - [minor] <issue_id>: <what changed>
 
 ## Partially Accepted
-- [major] <issue_id>: <what you changed instead and why>
+- [major] <issue_id>: Codex suggested X, but I did Y instead because
+  goal.md says "..." (cite specific text)
 
 ## Rejected
-- [minor] <issue_id>: <why you disagree — give specific reasoning>
-- [nit] <issue_id>: <why this is not an issue>
+- [minor] <issue_id>: This is not an issue because contract.json
+  criterion "completeness" means Z, and the draft already covers it
+  at Step 3 (cite specific location)
 
 ## Deferred
-- [nit] <issue_id>: <why not now>
+- [nit] <issue_id>: Valid but out of scope per goal.md non-goals
 ```
 
-This revision summary is what Codex reads next round. If your reasoning
-is sound, Codex should drop the issue. If Codex still disagrees after
-seeing your argument, it becomes a true disagreement → escalate to user.
+Codex reads this next round. If your reasoning is sound, Codex should
+drop the issue. If Codex still insists after seeing your evidence,
+it becomes a **true disagreement** → escalate to user (see below).
 
 #### 3b. Re-review
 
@@ -214,8 +237,9 @@ Based on exit code:
 - **3 (blocked)** → show remaining issues, ask user: raise limit / accept as-is / abort
 - **4 (insufficient_context)** → fix source manifest, retry
 
-**Disagreement detection:** if the same issue persists across 2+ consecutive
-rounds (by issue_id), stop and present to user: "We disagree on <issue>. Your call."
+**Disagreement detection:** if the same `issue_id` persists across 2+
+consecutive rounds after Claude has provided evidence-based rejection,
+it is a true disagreement → escalate to user.
 
 ---
 
@@ -243,6 +267,44 @@ Only when `after_approval` is `execute_plan` AND user confirms.
 
 ---
 
+## User Visibility
+
+The user is the final arbiter — not a passive observer. The system must
+keep the user informed of key state and surface disagreements proactively.
+
+### During each review round (runner output)
+- Round number
+- Transport method: fresh / resume (and whether fallback occurred)
+- Model and reasoning effort being used
+- Elapsed time
+- Live progress: files being read, commands being run
+
+### After each review round (Claude reports to user)
+- Verdict and confidence
+- Issue counts: major / minor / nit
+- Top 1-3 key issues (one sentence each)
+- Path to full review file
+
+### After Claude revises (Claude reports to user)
+- How many issues accepted / partially accepted / rejected / deferred
+- For each rejection or partial accept: one-sentence reason
+- Clear statement of what changed in the draft
+
+### Must escalate to user immediately
+- Same issue_id unresolved for 2+ consecutive rounds (true disagreement)
+- `max_rounds` reached without consensus
+- `insufficient_context` (exit 4)
+- `blocked` (exit 3)
+- Claude and Codex have fundamentally opposing views on the approach
+
+### Do NOT flood the user with
+- Full JSONL event streams
+- Low-level transport details
+- Issues that were accepted without controversy
+- Unchanged state between rounds
+
+---
+
 ## Runner CLI Reference
 
 ```bash
@@ -255,8 +317,8 @@ python3 rival_review.py review
 # Run with resume optimization
 python3 rival_review.py review --resume
 
-# Override timeout or model
-python3 rival_review.py review --timeout 600 --model o3
+# Override model or timeout (overrides contract.json)
+python3 rival_review.py review --model o3 --timeout 600
 
 # Check current state
 python3 rival_review.py status
@@ -266,29 +328,37 @@ python3 rival_review.py status
 
 ## Defaults & Overrides
 
-| Setting | Default | Override |
-|---------|---------|---------|
-| max_rounds | 5 | Set in contract.json |
-| codex model | codex default | `--model o3` |
-| reasoning_effort | codex default | `--reasoning-effort high` |
-| timeout | 300s | `--timeout 600` |
-| transport | fresh (default) | `--resume` to attempt resume |
+| Setting | Default | Source | Override |
+|---------|---------|-------|---------|
+| model | gpt-5.4 | contract.json | `--model o3` |
+| reasoning_effort | xhigh | contract.json | `--reasoning-effort high` |
+| max_rounds | 0 (unlimited) | contract.json | set in contract.json |
+| timeout | 1800s | contract.json | `--timeout 600` |
+| transport | fresh | - | `--resume` to attempt resume |
+
+**Priority**: CLI flag > contract.json > runner default.
 
 ---
 
 ## Hard Rules
 
-1. **Fresh exec is the default**. `--resume` is opt-in optimization only.
-2. **All state on disk**. Cross-round continuity = files, not model memory.
-3. **Workspace guard**: runner checks `git status` before/after every Codex call.
-4. **Strict validation**: all schema errors block. No warn-and-continue.
-5. **Failed rounds don't consume round count** toward max_rounds.
-6. **User decides** when models disagree for 2+ rounds on same issue.
-7. **No execution without explicit user confirmation** (when execute_plan).
-8. **Source Manifest: workspace-local paths only**. External content must be
-   pre-fetched to `.rival-review/sources/`.
-9. **contract.json is the machine contract**. Runner reads criteria, role,
-   sources, and transport config from it. goal.md is for humans.
-10. **Each round archived** with: draft, prompt, raw JSONL, review, transport
+1. **Claude and Codex are equals.** Neither has final authority. User decides ties.
+2. **Every issue must be accounted for.** No skipping. Accept / partial / reject / defer.
+3. **Rejections require evidence.** Cite goal.md, contract.json, sources, or draft.
+4. **Fresh exec is the default**. `--resume` is opt-in optimization only.
+5. **All state on disk**. Cross-round continuity = files, not model memory.
+6. **Workspace guard**: runner checks `git status` before/after every Codex call.
+7. **Strict validation**: all schema errors block. No warn-and-continue.
+8. **Failed rounds don't consume round count** toward max_rounds.
+9. **User decides** when models disagree for 2+ rounds on same issue.
+10. **No execution without explicit user confirmation** (when execute_plan).
+11. **Source Manifest: workspace-local paths only**. External content must be
+    pre-fetched to `.rival-review/sources/`.
+12. **contract.json is the machine contract**. Runner reads model, reasoning_effort,
+    criteria, role, sources, and transport config from it.
+13. **Default model is gpt-5.4, default reasoning is xhigh.** Explicit in contract,
+    not inherited from CLI global defaults.
+14. **Each round archived** with: draft, prompt, raw JSONL, review, transport
     metadata, contract snapshot. Resume/retry get separate raw files.
-11. **verdict/approved consistency** is enforced by the runner.
+15. **User sees key info by default**: verdict, issue summary, disagreements.
+    Not raw JSONL or low-level transport noise.

@@ -93,6 +93,8 @@ DEFAULT_CONTRACT = {
         "allow_resume": True,
         "timeout_sec": 1800,
         "sandbox": "read-only",
+        "model": "gpt-5.4",
+        "reasoning_effort": "xhigh",
     },
     "max_rounds": 0,  # 0 = unlimited (until consensus)
     "after_approval": "present_plan_only",
@@ -682,9 +684,13 @@ def cmd_review(
         return EXIT_BLOCKED
 
     transport_cfg = contract.get("transport", {})
-    timeout_sec = timeout_override or transport_cfg.get("timeout_sec", 300)
+    timeout_sec = timeout_override or transport_cfg.get("timeout_sec", 1800)
     sandbox = transport_cfg.get("sandbox", "read-only")
     allow_resume = transport_cfg.get("allow_resume", True)
+
+    # Model: CLI param > contract > None (Codex default)
+    effective_model = model or transport_cfg.get("model")
+    effective_reasoning = reasoning_effort or transport_cfg.get("reasoning_effort")
 
     is_revision = current_round > 1
     prompt = build_review_prompt(contract, current_round, is_revision=is_revision)
@@ -729,7 +735,7 @@ def cmd_review(
         resume_raw = rdir / "raw-resume.jsonl"
         exit_code = run_codex_resume(
             prompt, thread_id, timeout_sec, resume_raw,
-            model=model, reasoning_effort=reasoning_effort,
+            model=effective_model, reasoning_effort=effective_reasoning,
         )
         if exit_code == 0:
             actual_transport = "resume"
@@ -743,7 +749,7 @@ def cmd_review(
                     retry_count = 1
                     exit_code = run_codex_resume(
                         retry_prompt, thread_id, timeout_sec, retry_raw,
-                        model=model, reasoning_effort=reasoning_effort,
+                        model=effective_model, reasoning_effort=effective_reasoning,
                     )
                     if exit_code == 0:
                         tid, review = parse_codex_output(retry_raw)
@@ -762,7 +768,7 @@ def cmd_review(
             fresh_raw = rdir / "raw-fresh.jsonl"
             exit_code = run_codex_fresh(
                 prompt, schema_path, timeout_sec, sandbox, fresh_raw,
-                model=model, reasoning_effort=reasoning_effort,
+                model=effective_model, reasoning_effort=effective_reasoning,
             )
             if exit_code >= 0:
                 thread_id_new, review = parse_codex_output(fresh_raw)
@@ -773,7 +779,7 @@ def cmd_review(
         fresh_raw = rdir / "raw.jsonl"
         exit_code = run_codex_fresh(
             prompt, schema_path, timeout_sec, sandbox, fresh_raw,
-            model=model, reasoning_effort=reasoning_effort,
+            model=effective_model, reasoning_effort=effective_reasoning,
         )
         if exit_code >= 0:
             thread_id_new, review = parse_codex_output(fresh_raw)
@@ -790,8 +796,8 @@ def cmd_review(
         "fell_back_from_resume": fell_back,
         "retry_count": retry_count,
         "thread_id": thread_id,
-        "model": model,
-        "reasoning_effort": reasoning_effort,
+        "model": effective_model,
+        "reasoning_effort": effective_reasoning,
         "timeout_sec": timeout_sec,
         "sandbox": sandbox if actual_transport == "fresh" else None,
         "exit_code": exit_code,
