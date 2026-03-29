@@ -147,20 +147,47 @@ python3 rival_review.py status
 
 ### Phase 3 — Revision Loop
 
-#### 3a. Revise
+#### 3a. Revise (with independent judgment)
 
-1. Read `.rival-review/latest-review.json`
-2. Fix all `major` issues (must), address `minor` (should), judgment on `nit`
-3. Update `.rival-review/current-draft.md`
-4. Write `.rival-review/revision-summary.md`:
-   ```markdown
-   # Round N Revision
-   ## Addressed
-   - [major] <issue_id>: <what changed>
-   - [minor] <issue_id>: <what changed>
-   ## Deferred
-   - [nit] <issue_id>: <why>
-   ```
+Read `.rival-review/latest-review.json` and **critically evaluate each issue**.
+You are not Codex's subordinate — you are an equal participant in a dialogue.
+
+For each issue, independently decide:
+- **Agree and fix** — the issue is valid, change the draft
+- **Partially agree** — the concern is real but the suggested fix is wrong;
+  apply your own solution and explain why
+- **Disagree and defend** — the issue is incorrect, unnecessary, or based on
+  a misunderstanding; explain your reasoning clearly so Codex can reconsider
+
+Do NOT blindly accept all issues. Ask yourself:
+- Is this issue actually a problem, or is Codex being overly cautious?
+- Does the suggested fix make the draft better or worse?
+- Is Codex applying the right criteria, or misinterpreting the goal?
+
+Update `.rival-review/current-draft.md` with your changes.
+
+Write `.rival-review/revision-summary.md`:
+```markdown
+# Round N Revision
+
+## Accepted and Fixed
+- [major] <issue_id>: <what changed and why you agree>
+- [minor] <issue_id>: <what changed>
+
+## Partially Accepted
+- [major] <issue_id>: <what you changed instead and why>
+
+## Rejected
+- [minor] <issue_id>: <why you disagree — give specific reasoning>
+- [nit] <issue_id>: <why this is not an issue>
+
+## Deferred
+- [nit] <issue_id>: <why not now>
+```
+
+This revision summary is what Codex reads next round. If your reasoning
+is sound, Codex should drop the issue. If Codex still disagrees after
+seeing your argument, it becomes a true disagreement → escalate to user.
 
 #### 3b. Re-review
 
