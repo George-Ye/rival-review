@@ -467,6 +467,7 @@ def _stream_codex(
     prompt: str,
     timeout_sec: int,
     output_path: Path,
+    verbose: bool = False,
 ) -> int:
     """Run a codex command, stream JSONL, print live progress.
 
@@ -547,8 +548,8 @@ def _stream_codex(
 
             etype = event.get("type", "")
 
-            # Track file reads and commands
-            if etype == "item.completed":
+            # Track file reads and commands (verbose only)
+            if verbose and etype == "item.completed":
                 item = event.get("item", {})
                 if item.get("type") == "command_execution":
                     cmd_text = item.get("command", "")
@@ -590,6 +591,7 @@ def run_codex_fresh(
     output_path: Path,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    verbose: bool = False,
 ) -> int:
     """Run fresh codex exec with live progress."""
     cmd = ["codex", "exec"]
@@ -599,7 +601,7 @@ def run_codex_fresh(
     if model:
         cmd.extend(["--model", model])
     if reasoning_effort:
-        cmd.extend(["--reasoning-effort", reasoning_effort])
+        cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
     cmd.append("-")
 
     model_info = f"model: {model}" if model else "model: codex-default"
@@ -608,7 +610,7 @@ def run_codex_fresh(
     if re_info:
         info_parts.append(re_info)
     print(f"  Starting fresh review ({', '.join(info_parts)})...", flush=True)
-    return _stream_codex(cmd, prompt, timeout_sec, output_path)
+    return _stream_codex(cmd, prompt, timeout_sec, output_path, verbose=verbose)
 
 
 def run_codex_resume(
@@ -618,6 +620,7 @@ def run_codex_resume(
     output_path: Path,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    verbose: bool = False,
 ) -> int:
     """Run codex exec resume with live progress."""
     cmd = ["codex", "exec", "resume"]
@@ -625,14 +628,14 @@ def run_codex_resume(
     if model:
         cmd.extend(["--model", model])
     if reasoning_effort:
-        cmd.extend(["--reasoning-effort", reasoning_effort])
+        cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
     cmd.append(thread_id)
     cmd.append("-")
 
     model_info = f"model: {model}" if model else "model: codex-default"
     re_info = f", reasoning: {reasoning_effort}" if reasoning_effort else ""
     print(f"  Resuming session {thread_id[:12]}... ({model_info}{re_info})", flush=True)
-    return _stream_codex(cmd, prompt, timeout_sec, output_path)
+    return _stream_codex(cmd, prompt, timeout_sec, output_path, verbose=verbose)
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +691,7 @@ def cmd_review(
     timeout_override: int | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    verbose: bool = False,
 ) -> int:
     """Run one round of review."""
     workspace = Path.cwd()
@@ -776,7 +780,7 @@ def cmd_review(
         resume_raw = rdir / "raw-resume.jsonl"
         exit_code = run_codex_resume(
             prompt, thread_id, timeout_sec, resume_raw,
-            model=effective_model, reasoning_effort=effective_reasoning,
+            model=effective_model, reasoning_effort=effective_reasoning, verbose=verbose,
         )
         if exit_code == 0:
             actual_transport = "resume"
@@ -790,7 +794,7 @@ def cmd_review(
                     retry_count = 1
                     exit_code = run_codex_resume(
                         retry_prompt, thread_id, timeout_sec, retry_raw,
-                        model=effective_model, reasoning_effort=effective_reasoning,
+                        model=effective_model, reasoning_effort=effective_reasoning, verbose=verbose,
                     )
                     if exit_code == 0:
                         tid, review = parse_codex_output(retry_raw)
@@ -809,7 +813,7 @@ def cmd_review(
             fresh_raw = rdir / "raw-fresh.jsonl"
             exit_code = run_codex_fresh(
                 prompt, schema_path, timeout_sec, sandbox, fresh_raw,
-                model=effective_model, reasoning_effort=effective_reasoning,
+                model=effective_model, reasoning_effort=effective_reasoning, verbose=verbose,
             )
             if exit_code >= 0:
                 thread_id_new, review = parse_codex_output(fresh_raw)
@@ -820,7 +824,7 @@ def cmd_review(
         fresh_raw = rdir / "raw.jsonl"
         exit_code = run_codex_fresh(
             prompt, schema_path, timeout_sec, sandbox, fresh_raw,
-            model=effective_model, reasoning_effort=effective_reasoning,
+            model=effective_model, reasoning_effort=effective_reasoning, verbose=verbose,
         )
         if exit_code >= 0:
             thread_id_new, review = parse_codex_output(fresh_raw)
@@ -1013,7 +1017,9 @@ def main() -> int:
     review_p.add_argument("--model", type=str, default=None,
                           help="Codex model override")
     review_p.add_argument("--reasoning-effort", type=str, default=None,
-                          help="Codex reasoning effort")
+                          help="Codex reasoning effort (passed via -c config override)")
+    review_p.add_argument("--verbose", "-v", action="store_true",
+                          help="Show file reads and commands during review")
 
     sub.add_parser("status", help="Show current review status")
 
@@ -1027,6 +1033,7 @@ def main() -> int:
             timeout_override=args.timeout,
             model=args.model,
             reasoning_effort=args.reasoning_effort,
+            verbose=args.verbose,
         )
     elif args.command == "status":
         return cmd_status()
